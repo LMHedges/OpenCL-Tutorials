@@ -4,7 +4,6 @@
 #include "Utils.h"
 #include "CImg.h"
 
-
 using namespace cimg_library;
 
 void print_help() {
@@ -48,7 +47,7 @@ int main(int argc, char **argv) {
 		cl::Context context = GetContext(platform_id, device_id);
 
 		//display the selected device
-		std::cout << "Runing on " << GetPlatformName(platform_id) << ", " << GetDeviceName(platform_id, device_id) << std::endl;
+		std::cout << "Running on " << GetPlatformName(platform_id) << ", " << GetDeviceName(platform_id, device_id) << std::endl;
 
 		//create a queue to which we will push commands for the device
 		cl::CommandQueue queue(context);
@@ -83,7 +82,7 @@ int main(int argc, char **argv) {
 //		queue.enqueueWriteBuffer(dev_convolution_mask, CL_TRUE, 0, convolution_mask.size()*sizeof(float), &convolution_mask[0]);
 
 		//4.2 Setup and execute the kernel (i.e. device code)
-		cl::Kernel kernel = cl::Kernel(program, "identity");
+		cl::Kernel kernel = cl::Kernel(program, "rgb2grey");
 		kernel.setArg(0, dev_image_input);
 		kernel.setArg(1, dev_image_output);
 //		kernel.setArg(2, dev_convolution_mask);
@@ -95,13 +94,14 @@ int main(int argc, char **argv) {
 		queue.enqueueReadBuffer(dev_image_output, CL_TRUE, 0, output_buffer.size(), &output_buffer.data()[0]);
 
 		CImg<unsigned char> output_image(output_buffer.data(), image_input.width(), image_input.height(), image_input.depth(), image_input.spectrum());
-		CImgDisplay disp_output(output_image,"output");
+		CImgDisplay disp_output(output_image, "output");
 
  		while (!disp_input.is_closed() && !disp_output.is_closed()
 			&& !disp_input.is_keyESC() && !disp_output.is_keyESC()) {
 		    disp_input.wait(1);
 		    disp_output.wait(1);
 	    }		
+
 
 	}
 	catch (const cl::Error& err) {

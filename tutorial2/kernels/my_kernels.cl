@@ -74,3 +74,28 @@ kernel void convolutionND(global const uchar* A, global uchar* B, constant float
 
 	B[id] = (uchar)result;
 }
+
+kernel void rgb2grey(global const uchar* A, global uchar* B) {
+	int id = get_global_id(0);
+	int image_size = get_global_size(0)/3; //each image consists of 3 colour channels
+	int colour_channel = id / image_size; // 0 - red, 1 - green, 2 - blue
+
+
+	if (colour_channel == 0) {
+		B[id] = A[id] * 0.2126;
+	} else 
+	if (colour_channel == 1) {
+		B[id] = A[id] * 0.7152;
+	} else {
+		B[id] = A[id] * 0.0722;
+	}
+
+	if (colour_channel == 0) {
+		B[id] = 255 - ((A[id] * 0.2126) + (A[id + image_size] * 0.7152) + (A[id + (image_size * 2)] * 0.0722));
+	} else 
+	if (colour_channel == 1) {
+		B[id] = 255 - ((A[id - image_size] * 0.2126) + (A[id] * 0.7152) + (A[id + image_size] * 0.0722));
+	} else {
+		B[id] = 255 - ((A[id - (image_size * 2)] * 0.2126) + (A[id - image_size] * 0.7152) + (A[id] * 0.0722));
+	}
+}
