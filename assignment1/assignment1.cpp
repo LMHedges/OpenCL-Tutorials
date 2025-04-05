@@ -1,8 +1,8 @@
 #include <iostream>
 #include <vector>
+#include <chrono>
 #include "Utils.h"
 #include "CImg.h"
-#include <chrono>
 
 using namespace cimg_library;
 
@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
         queue.finish();
         kernel_time += std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t1).count();
 
-        // Read histogram from device for visualization
+        // Read histogram`from device for visualization
         std::vector<unsigned int> histogram(BINS);
         queue.enqueueReadBuffer(dev_histogram, CL_TRUE, 0, BINS * sizeof(unsigned int), histogram.data());
         CImg<unsigned char> hist_img(256, 200, 1, 1, 0);
@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
             int height = (int)((histogram[x] / (float)max_hist) * 200);
             hist_img.draw_line(x, 200, x, 200 - height, white);
         }
-        CImgDisplay disp_hist(hist_img, "Intensity Histogram (Fig. 1b)");
+        CImgDisplay disp_hist(hist_img, "Intensity Histogram");
 
         // Calculate cumulative histogram
         scan_kernel.setArg(0, dev_histogram);
@@ -118,7 +118,7 @@ int main(int argc, char **argv) {
             int height = (int)((cum_histogram[x] / (float)max_cum_hist) * 200);
             cum_hist_img.draw_line(x, 200, x, 200 - height, white);
         }
-        CImgDisplay disp_cum_hist(cum_hist_img, "Cumulative Histogram (Fig. 1c)");
+        CImgDisplay disp_cum_hist(cum_hist_img, "Cumulative Histogram");
 
         // Normalize LUT
         float scale = 255.0f / (image_input.width() * image_input.height());
@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
             int height = (int)((lut[x] / 255.0f) * 200);
             norm_cum_hist_img.draw_line(x, 200, x, 200 - height, white);
         }
-        CImgDisplay disp_norm_cum_hist(norm_cum_hist_img, "Normalized Cumulative Histogram (Fig. 1d)");
+        CImgDisplay disp_norm_cum_hist(norm_cum_hist_img, "Normalized Cumulative Histogram");
 
         // Back projection
         backproject_kernel.setArg(0, dev_image_input);
