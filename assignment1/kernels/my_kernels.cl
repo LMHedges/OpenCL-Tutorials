@@ -10,7 +10,6 @@ kernel void filter_r(global const uchar* A, global uchar* B) {
     int image_size = get_global_size(0) / 3; // Each image consists of 3 colour channels
     int colour_channel = id / image_size; // 0 - red, 1 - green, 2 - blue
 
-    // Only copy red channel
     if (colour_channel == 0) {
         B[id] = A[id];
     } else {
@@ -18,7 +17,7 @@ kernel void filter_r(global const uchar* A, global uchar* B) {
     }
 }
 
-// Simple ND identity kernel (unchanged)
+// Simple ND identity kernel
 kernel void identityND(global const uchar* A, global uchar* B) {
     int width = get_global_size(0); // Image width in pixels
     int height = get_global_size(1); // Image height in pixels
@@ -34,7 +33,7 @@ kernel void identityND(global const uchar* A, global uchar* B) {
     B[id] = A[id];
 }
 
-// 2D averaging filter (unchanged)
+// 2D averaging filter
 kernel void avg_filterND(global const uchar* A, global uchar* B) {
     int width = get_global_size(0); // Image width in pixels
     int height = get_global_size(1); // Image height in pixels
@@ -58,7 +57,7 @@ kernel void avg_filterND(global const uchar* A, global uchar* B) {
     B[id] = (uchar)result;
 }
 
-// 2D 3x3 convolution kernel (unchanged)
+// 2D 3x3 convolution kernel
 kernel void convolutionND(global const uchar* A, global uchar* B, constant float* mask) {
     int width = get_global_size(0); // Image width in pixels
     int height = get_global_size(1); // Image height in pixels
@@ -80,7 +79,7 @@ kernel void convolutionND(global const uchar* A, global uchar* B, constant float
     B[id] = (uchar)result;
 }
 
-// RGB to grayscale (unchanged, for 8-bit RGB)
+// RGB to grayscale (for 8-bit RGB)
 kernel void rgb2grey(global const uchar* A, global uchar* B) {
     int id = get_global_id(0);
     int image_size = get_global_size(0) / 3; // Each image consists of 3 colour channels
@@ -95,14 +94,14 @@ kernel void rgb2grey(global const uchar* A, global uchar* B) {
     }
 }
 
-// Fixed 4-step reduce (unchanged)
+// Fixed 4-step reduce
 kernel void reduce_add_1(global const int* A, global int* B) {
     int id = get_global_id(0);
     int N = get_global_size(0);
 
     B[id] = A[id]; // Copy input to output
 
-    barrier(CLK_GLOBAL_MEM_FENCE); // Wait for all threads to finish copying
+    barrier(CLK_GLOBAL_MEM_FENCE);
 
     if (((id % 2) == 0) && ((id + 1) < N))
         B[id] += B[id + 1];
@@ -123,7 +122,7 @@ kernel void reduce_add_1(global const int* A, global int* B) {
         B[id] += B[id + 8];
 }
 
-// Flexible step reduce (unchanged)
+// Flexible step reduce
 kernel void reduce_add_2(global const int* A, global int* B) {
     int id = get_global_id(0);
     int N = get_global_size(0);
@@ -132,7 +131,7 @@ kernel void reduce_add_2(global const int* A, global int* B) {
 
     barrier(CLK_GLOBAL_MEM_FENCE);
 
-    for (int i = 1; i < N; i *= 2) { // i is a stride
+    for (int i = 1; i < N; i *= 2) {
         if (!(id % (i * 2)) && ((id + i) < N))
             B[id] += B[id + i];
 
@@ -140,7 +139,7 @@ kernel void reduce_add_2(global const int* A, global int* B) {
     }
 }
 
-// Reduce using local memory (unchanged)
+// Reduce using local memory
 kernel void reduce_add_3(global const int* A, global int* B, local int* scratch) {
     int id = get_global_id(0);
     int lid = get_local_id(0);
@@ -160,7 +159,7 @@ kernel void reduce_add_3(global const int* A, global int* B, local int* scratch)
     B[id] = scratch[lid];
 }
 
-// Reduce using local memory + accumulation (unchanged)
+// Reduce using local memory + accumulation
 kernel void reduce_add_4(global const int* A, global int* B, local int* scratch) {
     int id = get_global_id(0);
     int lid = get_local_id(0);
@@ -182,17 +181,17 @@ kernel void reduce_add_4(global const int* A, global int* B, local int* scratch)
     }
 }
 
-// Modified histogram kernel for 16-bit grayscale input
+// Histogram kernel for 16-bit input (single channel)
 kernel void hist_simple(global const ushort* A, global int* H, int nr_bins) {
     int id = get_global_id(0);
     ushort value = A[id];
-    int bin_index = (value * nr_bins) / 65536; // Scale 16-bit value (0-65535) to 256 bins
+    int bin_index = (value * nr_bins) / 65536; // Scale 16-bit value to 256 bins
     if (bin_index < nr_bins) {
         atomic_inc(&H[bin_index]);
     }
 }
 
-// Hillis-Steele basic inclusive scan (unchanged)
+// Hillis-Steele basic inclusive scan
 kernel void scan_hs(global int* A, global int* B) {
     int id = get_global_id(0);
     int N = get_global_size(0);
@@ -203,13 +202,13 @@ kernel void scan_hs(global int* A, global int* B) {
         if (id >= stride)
             B[id] += A[id - stride];
 
-        barrier(CLK_GLOBAL_MEM_FENCE); // Sync the step
+        barrier(CLK_GLOBAL_MEM_FENCE);
 
-        C = A; A = B; B = C; // Swap A & B between steps
+        C = A; A = B; B = C; // Swap A & B
     }
 }
 
-// Double-buffered Hillis-Steele scan (unchanged)
+// Double-buffered Hillis-Steele scan
 kernel void scan_add(__global const int* A, global int* B, local int* scratch_1, local int* scratch_2) {
     int id = get_global_id(0);
     int lid = get_local_id(0);
@@ -236,7 +235,7 @@ kernel void scan_add(__global const int* A, global int* B, local int* scratch_1,
     B[id] = scratch_1[lid];
 }
 
-// Blelloch basic exclusive scan for cumulative histogram (unchanged)
+// Blelloch basic exclusive scan for cumulative histogram
 kernel void scan_bl(global int* A) {
     int id = get_global_id(0);
     int N = get_global_size(0);
@@ -247,33 +246,33 @@ kernel void scan_bl(global int* A) {
         if (((id + 1) % (stride * 2)) == 0)
             A[id] += A[id - stride];
 
-        barrier(CLK_GLOBAL_MEM_FENCE); // Sync the step
+        barrier(CLK_GLOBAL_MEM_FENCE);
     }
 
     // Down-sweep
     if (id == 0)
         A[N - 1] = 0; // Exclusive scan
 
-    barrier(CLK_GLOBAL_MEM_FENCE); // Sync the step
+    barrier(CLK_GLOBAL_MEM_FENCE);
 
     for (int stride = N / 2; stride > 0; stride /= 2) {
         if (((id + 1) % (stride * 2)) == 0) {
             t = A[id];
-            A[id] += A[id - stride]; // Reduce
-            A[id - stride] = t;      // Move
+            A[id] += A[id - stride];
+            A[id - stride] = t;
         }
 
-        barrier(CLK_GLOBAL_MEM_FENCE); // Sync the step
+        barrier(CLK_GLOBAL_MEM_FENCE);
     }
 }
 
-// Calculates block sums (unchanged)
+// Calculates block sums
 kernel void block_sum(global const int* A, global int* B, int local_size) {
     int id = get_global_id(0);
     B[id] = A[(id + 1) * local_size - 1];
 }
 
-// Simple exclusive serial scan based on atomic operations (unchanged)
+// Simple exclusive serial scan based on atomic operations
 kernel void scan_add_atomic(global int* A, global int* B) {
     int id = get_global_id(0);
     int N = get_global_size(0);
@@ -281,7 +280,7 @@ kernel void scan_add_atomic(global int* A, global int* B) {
         atomic_add(&B[i], A[id]);
 }
 
-// Adjust partial scans by adding block sums (unchanged)
+// Adjust partial scans by adding block sums
 kernel void scan_add_adjust(global int* A, global const int* B) {
     int id = get_global_id(0);
     int gid = get_group_id(0);
@@ -291,11 +290,11 @@ kernel void scan_add_adjust(global int* A, global const int* B) {
 // Normalize LUT kernel for 16-bit output
 kernel void normalize_lut(global const int* cum_histogram, global ushort* lut, float scale) {
     int id = get_global_id(0);
-    int bin = id / 256; // Map 16-bit value (0-65535) to one of 256 bins
-    lut[id] = (ushort)(cum_histogram[bin] * scale); // Scale to 16-bit range (0-65535)
+    int bin = id / 256; // Map 16-bit value to one of 256 bins
+    lut[id] = (ushort)(cum_histogram[bin] * scale); // Scale to 16-bit range
 }
 
-// Back projection kernel for 16-bit histogram equalization
+// Back projection kernel for 16-bit data
 kernel void back_project(global const ushort* input, global ushort* output, global ushort* lut) {
     int id = get_global_id(0);
     output[id] = lut[input[id]];
