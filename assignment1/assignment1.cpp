@@ -258,6 +258,7 @@ int main(int argc, char **argv) {
         CImgDisplay disp_output(output_image, "Equalized Image");
 
         // Print timing and complexity results for each channel
+        double combined_total_time = 0.0; // To store the sum of total times across all channels
         for (int c = 0; c < channels; c++) {
             std::cout << "\nPerformance Metrics (seconds) and Complexity for Channel " << (c + 1) << " (Bins: " << num_bins << "):\n";
             std::cout << "Step 1: Input Transfer and Initialization\n";
@@ -298,6 +299,13 @@ int main(int argc, char **argv) {
             double overall_total_time = metrics[c][0].total_time + metrics[c][1].total_time + metrics[c][2].total_time + 
                                         metrics[c][3].total_time + metrics[c][4].total_time;
             std::cout << "Overall Total Time for Channel " << (c + 1) << ": " << overall_total_time << " seconds\n";
+
+            combined_total_time += overall_total_time; // Accumulate total time for all channels
+        }
+
+        // Print combined total time for all channels
+        if (channels > 1) { // Only print if there are multiple channels (e.g., RGB)
+            std::cout << "\nTotal Time for All Channels Combined (RGB Image): " << combined_total_time << " seconds\n";
         }
 
         // Wait for all windows to close
