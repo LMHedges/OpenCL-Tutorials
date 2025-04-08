@@ -30,8 +30,32 @@ int main(int argc, char **argv) {
     cimg::exception_mode(0);
 
     try {
-        // Load input image (PGM or PPM, 16-bit)
-        CImg<unsigned short> image_input(image_filename.c_str());
+        // Load input image (16-bit or 8-bit with scaling)
+        CImg<unsigned short> image_input;
+
+        // Check file header to determine bit depth (PGM/PPM files)
+        FILE* file = fopen(image_filename.c_str(), "rb");
+        if (!file) throw CImgIOException("Cannot open file");
+        
+        char magic[3] = {0};
+        int maxval = 0;
+        fscanf(file, "%2s %*d %*d %d", magic, &maxval);
+        fclose(file);
+
+        bool is_8bit = (maxval <= 255);
+
+        if (is_8bit) {
+            // Load 8-bit image and scale to 16-bit
+            CImg<unsigned char> image_8bit(image_filename.c_str());
+            image_input.assign(image_8bit.width(), image_8bit.height(), 1, image_8bit.spectrum());
+            cimg_forXYC(image_input, x, y, c) {
+                image_input(x, y, 0, c) = (unsigned short)(image_8bit(x, y, 0, c) * 257); // Scale 0-255 to 0-65535
+            }
+        } else {
+            // Load 16-bit image directly
+            image_input = CImg<unsigned short>(image_filename.c_str());
+        }
+
         CImgDisplay disp_input(image_input, "Input Image");
 
         // Setup OpenCL
