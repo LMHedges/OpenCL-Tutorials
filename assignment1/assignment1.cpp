@@ -17,7 +17,7 @@ void print_help() {
 int main(int argc, char **argv) {
     int platform_id = 0;
     int device_id = 0;
-    string image_filename = "test.pgm"; // Default to PGM, can be overridden
+    string image_filename = "mdr16-gs.pgm"; // Default to 16-bit PGM
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-p") == 0) && (i < (argc - 1))) { platform_id = atoi(argv[++i]); }
@@ -30,8 +30,8 @@ int main(int argc, char **argv) {
     cimg::exception_mode(0);
 
     try {
-        // Load input image (PGM or PPM)
-        CImg<unsigned char> image_input(image_filename.c_str());
+        // Load input image (PGM or PPM, 8-bit or 16-bit)
+        CImg<unsigned short> image_input(image_filename.c_str());
         CImgDisplay disp_input(image_input, "Input Image");
 
         // Setup OpenCL
@@ -57,27 +57,27 @@ int main(int argc, char **argv) {
         size_t height = image_input.height();
         size_t channels = image_input.spectrum();
         size_t image_size = width * height; // Size of one channel
-        CImg<unsigned char> intensity(image_size, 1, 1, 1, 0);
+        CImg<unsigned short> intensity(image_size, 1, 1, 1, 0);
 
-        if (channels == 1) { // PGM
+        if (channels == 1) { // PGM (8-bit or 16-bit)
             intensity = image_input;
-        } else if (channels == 3) { // PPM
+        } else if (channels == 3) { // PPM (16-bit RGB)
             cimg_forXY(image_input, x, y) {
-                unsigned char r = image_input(x, y, 0, 0);
-                unsigned char g = image_input(x, y, 0, 1);
-                unsigned char b = image_input(x, y, 0, 2);
-                intensity(x + y * width) = (unsigned char)(0.299f * r + 0.587f * g + 0.114f * b); // Luminance
+                unsigned short r = image_input(x, y, 0, 0);
+                unsigned short g = image_input(x, y, 0, 1);
+                unsigned short b = image_input(x, y, 0, 2);
+                intensity(x + y * width) = (unsigned short)(0.299f * r + 0.587f * g + 0.114f * b); // Luminance
             }
         } else {
             throw std::runtime_error("Unsupported number of channels");
         }
 
         // Device buffers
-        cl::Buffer dev_image_input(context, CL_MEM_READ_ONLY, image_size); // Intensity channel
-        cl::Buffer dev_image_output(context, CL_MEM_WRITE_ONLY, image_size * channels); // Full output
+        cl::Buffer dev_image_input(context, CL_MEM_READ_ONLY, image_size * sizeof(unsigned short));
+        cl::Buffer dev_image_output(context, CL_MEM_WRITE_ONLY, image_size * sizeof(unsigned short));
         cl::Buffer dev_histogram(context, CL_MEM_READ_WRITE, 256 * sizeof(unsigned int));
         cl::Buffer dev_cum_histogram(context, CL_MEM_READ_WRITE, 256 * sizeof(unsigned int));
-        cl::Buffer dev_lut(context, CL_MEM_READ_WRITE, 256 * sizeof(unsigned char));
+        cl::Buffer dev_lut(context, CL_MEM_READ_WRITE, 65536 * sizeof(unsigned short)); // 16-bit LUT
 
         // Timing and metrics per step
         struct StepMetrics {
@@ -92,7 +92,7 @@ int main(int argc, char **argv) {
 
         // Step 1: Copy intensity to device and initialize histogram
         cl::Event event1a, event1b;
-        queue.enqueueWriteBuffer(dev_image_input, CL_TRUE, 0, image_size, intensity.data(), nullptr, &event1a);
+        queue.enqueueWriteBuffer(dev_image_input, CL_TRUE, 0, image_size * sizeof(unsigned short), intensity.data(), nullptr, &event1a);
         std::vector<unsigned int> zeros(BINS, 0);
         queue.enqueueWriteBuffer(dev_histogram, CL_TRUE, 0, BINS * sizeof(unsigned int), zeros.data(), nullptr, &event1b);
         event1a.wait();
@@ -156,31 +156,31 @@ int main(int argc, char **argv) {
 
         // Step 4: Normalize LUT
         cl::Event event4a, event4b;
-        float scale = 255.0f / (image_input.width() * image_input.height());
+        float scale = 65535.0f / (image_input.width() * image_input.height()); // Scale to 16-bit range
         cl::Kernel normalize_kernel(program, "normalize_lut");
         normalize_kernel.setArg(0, dev_histogram);
         normalize_kernel.setArg(1, dev_lut);
         normalize_kernel.setArg(2, scale);
-        queue.enqueueNDRangeKernel(normalize_kernel, cl::NullRange, cl::NDRange(BINS), cl::NullRange, nullptr, &event4a);
+        queue.enqueueNDRangeKernel(normalize_kernel, cl::NullRange, cl::NDRange(65536), cl::NullRange, nullptr, &event4a); // Full 16-bit range
         event4a.wait();
         step4.kernel_time = (event4a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
 
-        std::vector<unsigned char> lut(BINS);
-        queue.enqueueReadBuffer(dev_lut, CL_TRUE, 0, BINS * sizeof(unsigned char), lut.data(), nullptr, &event4b);
+        std::vector<unsigned short> lut(65536);
+        queue.enqueueReadBuffer(dev_lut, CL_TRUE, 0, 65536 * sizeof(unsigned short), lut.data(), nullptr, &event4b);
         event4b.wait();
         step4.transfer_time = (event4b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
         step4.total_time = step4.kernel_time + step4.transfer_time;
-        step4.work = BINS;
+        step4.work = 65536;
         step4.span = 1;
 
-        CImg<unsigned char> norm_cum_hist_img(256, 200, 1, 1, 0);
+        CImg<unsigned char> norm_cum_hist_img(256, 200, 1, 1, 0); // Still display 256 bins for visualization
         for (int x = 0; x < 256; x++) {
-            int height = (int)((lut[x] / 255.0f) * 200);
+            int height = (int)((lut[x * 256] / 65535.0f) * 200); // Sample every 256th value for display
             norm_cum_hist_img.draw_line(x, 200, x, 200 - height, white);
         }
         CImgDisplay disp_norm_cum_hist(norm_cum_hist_img, "Normalized Cumulative Histogram");
 
-        // Step 5: Back projection (apply LUT to all channels)
+        // Step 5: Back projection
         cl::Event event5a, event5b;
         cl::Kernel backproject_kernel(program, "back_project");
         backproject_kernel.setArg(0, dev_image_input);
@@ -190,26 +190,16 @@ int main(int argc, char **argv) {
         event5a.wait();
         step5.kernel_time = (event5a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event5a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
 
-        std::vector<unsigned char> output_buffer(image_size * channels);
-        queue.enqueueReadBuffer(dev_image_output, CL_TRUE, 0, image_size * channels, output_buffer.data(), nullptr, &event5b);
+        std::vector<unsigned short> output_buffer(image_size);
+        queue.enqueueReadBuffer(dev_image_output, CL_TRUE, 0, image_size * sizeof(unsigned short), output_buffer.data(), nullptr, &event5b);
         event5b.wait();
         step5.transfer_time = (event5b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event5b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
-
-        // Apply LUT to all channels on host for PPM
-        if (channels == 3) {
-            cimg_forXY(image_input, x, y) {
-                for (int c = 0; c < 3; c++) {
-                    unsigned char val = image_input(x, y, 0, c);
-                    output_buffer[(x + y * width) * 3 + c] = lut[val];
-                }
-            }
-        }
         step5.total_time = step5.kernel_time + step5.transfer_time;
         step5.work = image_size;
         step5.span = 1;
 
         // Display output
-        CImg<unsigned char> output_image(output_buffer.data(), width, height, 1, channels);
+        CImg<unsigned short> output_image(output_buffer.data(), width, height, 1, 1);
         CImgDisplay disp_output(output_image, "Equalized Image");
 
         // Print timing and complexity results for each step
