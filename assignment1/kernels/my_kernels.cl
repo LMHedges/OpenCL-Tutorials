@@ -181,14 +181,13 @@ kernel void reduce_add_4(global const int* A, global int* B, local int* scratch)
     }
 }
 
-// Histogram kernel for 16-bit input (single channel)
+// Histogram kernel for 16-bit input (single channel) with variable bins
 kernel void hist_simple(global const ushort* A, global int* H, int nr_bins) {
     int id = get_global_id(0);
     ushort value = A[id];
-    int bin_index = (value * nr_bins) / 65536; // Scale 16-bit value to 256 bins
-    if (bin_index < nr_bins) {
-        atomic_inc(&H[bin_index]);
-    }
+    int bin_index = (value * nr_bins) / 65536; // Scale 16-bit value to nr_bins
+    if (bin_index >= nr_bins) bin_index = nr_bins - 1; // Clamp to valid range
+    atomic_inc(&H[bin_index]);
 }
 
 // Hillis-Steele basic inclusive scan
@@ -235,10 +234,11 @@ kernel void scan_add(__global const int* A, global int* B, local int* scratch_1,
     B[id] = scratch_1[lid];
 }
 
-// Blelloch basic exclusive scan for cumulative histogram
-kernel void scan_bl(global int* A) {
+// Blelloch basic exclusive scan for cumulative histogram with variable bins
+kernel void scan_bl(global int* A, const int nr_bins) {
     int id = get_global_id(0);
-    int N = get_global_size(0);
+    if (id >= nr_bins) return; // Guard against out-of-bounds access
+    int N = nr_bins;
     int t;
 
     // Up-sweep
@@ -287,10 +287,12 @@ kernel void scan_add_adjust(global int* A, global const int* B) {
     A[id] += B[gid];
 }
 
-// Normalize LUT kernel for 16-bit output
-kernel void normalize_lut(global const int* cum_histogram, global ushort* lut, float scale) {
+// Normalize LUT kernel for 16-bit output with variable bins
+kernel void normalize_lut(global const int* cum_histogram, global ushort* lut, float scale, const int nr_bins) {
     int id = get_global_id(0);
-    int bin = id / 256; // Map 16-bit value to one of 256 bins
+    if (id >= 65536) return; // Guard against out-of-bounds access
+    int bin = (id * nr_bins) / 65536; // Map 16-bit value to nr_bins
+    if (bin >= nr_bins) bin = nr_bins - 1; // Clamp to valid range
     lut[id] = (ushort)(cum_histogram[bin] * scale); // Scale to 16-bit range
 }
 
