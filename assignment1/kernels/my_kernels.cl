@@ -1,193 +1,32 @@
-// A simple OpenCL kernel which copies all pixels from A to B
-kernel void identity(global const uchar* A, global uchar* B) {
-    int id = get_global_id(0);
-    B[id] = A[id];
-}
+// Histogram kernel using local memory for 16-bit input with variable bins
+kernel void hist_local(global const ushort* A, global int* H, int nr_bins, local int* local_hist) {
+    int gid = get_global_id(0);    // Global thread ID
+    int lid = get_local_id(0);     // Local thread ID within work-group
+    int group_size = get_local_size(0); // Number of threads in work-group
 
-// Filter to extract red channel (example, unchanged)
-kernel void filter_r(global const uchar* A, global uchar* B) {
-    int id = get_global_id(0);
-    int image_size = get_global_size(0) / 3; // Each image consists of 3 colour channels
-    int colour_channel = id / image_size; // 0 - red, 1 - green, 2 - blue
-
-    if (colour_channel == 0) {
-        B[id] = A[id];
-    } else {
-        B[id] = 0;
+    // Initialize local histogram (each thread clears a portion)
+    for (int i = lid; i < nr_bins; i += group_size) {
+        local_hist[i] = 0;
     }
-}
+    barrier(CLK_LOCAL_MEM_FENCE); // Ensure all local memory is initialized
 
-// Simple ND identity kernel
-kernel void identityND(global const uchar* A, global uchar* B) {
-    int width = get_global_size(0); // Image width in pixels
-    int height = get_global_size(1); // Image height in pixels
-    int image_size = width * height; // Image size in pixels
-    int channels = get_global_size(2); // Number of colour channels: 3 for RGB
-
-    int x = get_global_id(0); // Current x coord
-    int y = get_global_id(1); // Current y coord
-    int c = get_global_id(2); // Current colour channel
-
-    int id = x + y * width + c * image_size; // Global id in 1D space
-
-    B[id] = A[id];
-}
-
-// 2D averaging filter
-kernel void avg_filterND(global const uchar* A, global uchar* B) {
-    int width = get_global_size(0); // Image width in pixels
-    int height = get_global_size(1); // Image height in pixels
-    int image_size = width * height; // Image size in pixels
-    int channels = get_global_size(2); // Number of colour channels: 3 for RGB
-
-    int x = get_global_id(0); // Current x coord
-    int y = get_global_id(1); // Current y coord
-    int c = get_global_id(2); // Current colour channel
-
-    int id = x + y * width + c * image_size; // Global id in 1D space
-
-    uint result = 0;
-
-    for (int i = max(x - 1, 0); i <= min(x + 1, width - 1); i++)
-        for (int j = max(y - 1, 0); j <= min(y + 1, height - 1); j++)
-            result += A[i + j * width + c * image_size];
-
-    result /= 9;
-
-    B[id] = (uchar)result;
-}
-
-// 2D 3x3 convolution kernel
-kernel void convolutionND(global const uchar* A, global uchar* B, constant float* mask) {
-    int width = get_global_size(0); // Image width in pixels
-    int height = get_global_size(1); // Image height in pixels
-    int image_size = width * height; // Image size in pixels
-    int channels = get_global_size(2); // Number of colour channels: 3 for RGB
-
-    int x = get_global_id(0); // Current x coord
-    int y = get_global_id(1); // Current y coord
-    int c = get_global_id(2); // Current colour channel
-
-    int id = x + y * width + c * image_size; // Global id in 1D space
-
-    float result = 0;
-
-    for (int i = max(x - 1, 0); i <= min(x + 1, width - 1); i++)
-        for (int j = max(y - 1, 0); j <= min(y + 1, height - 1); j++)
-            result += A[i + j * width + c * image_size] * mask[(i - (x - 1)) + (j - (y - 1)) * 3];
-
-    B[id] = (uchar)result;
-}
-
-// RGB to grayscale (for 8-bit RGB)
-kernel void rgb2grey(global const uchar* A, global uchar* B) {
-    int id = get_global_id(0);
-    int image_size = get_global_size(0) / 3; // Each image consists of 3 colour channels
-    int colour_channel = id / image_size; // 0 - red, 1 - green, 2 - blue
-
-    if (colour_channel == 0) {
-        B[id] = 255 - ((A[id] * 0.2126) + (A[id + image_size] * 0.7152) + (A[id + (image_size * 2)] * 0.0722));
-    } else if (colour_channel == 1) {
-        B[id] = 255 - ((A[id - image_size] * 0.2126) + (A[id] * 0.7152) + (A[id + image_size] * 0.0722));
-    } else {
-        B[id] = 255 - ((A[id - (image_size * 2)] * 0.2126) + (A[id - image_size] * 0.7152) + (A[id] * 0.0722));
+    // Calculate bin index for this thread's value
+    if (gid < get_global_size(0)) { // Ensure we don't exceed image size
+        ushort value = A[gid];
+        int bin_index = (value * nr_bins) / 65536; // Scale 16-bit value to nr_bins
+        if (bin_index >= nr_bins) bin_index = nr_bins - 1; // Clamp to valid range
+        
+        // Atomically increment local histogram
+        atomic_add(&local_hist[bin_index], 1);
     }
-}
+    barrier(CLK_LOCAL_MEM_FENCE); // Wait for all threads in group to finish
 
-// Fixed 4-step reduce
-kernel void reduce_add_1(global const int* A, global int* B) {
-    int id = get_global_id(0);
-    int N = get_global_size(0);
-
-    B[id] = A[id]; // Copy input to output
-
-    barrier(CLK_GLOBAL_MEM_FENCE);
-
-    if (((id % 2) == 0) && ((id + 1) < N))
-        B[id] += B[id + 1];
-
-    barrier(CLK_GLOBAL_MEM_FENCE);
-
-    if (((id % 4) == 0) && ((id + 2) < N))
-        B[id] += B[id + 2];
-
-    barrier(CLK_GLOBAL_MEM_FENCE);
-
-    if (((id % 8) == 0) && ((id + 4) < N))
-        B[id] += B[id + 4];
-
-    barrier(CLK_GLOBAL_MEM_FENCE);
-
-    if (((id % 16) == 0) && ((id + 8) < N))
-        B[id] += B[id + 8];
-}
-
-// Flexible step reduce
-kernel void reduce_add_2(global const int* A, global int* B) {
-    int id = get_global_id(0);
-    int N = get_global_size(0);
-
-    B[id] = A[id];
-
-    barrier(CLK_GLOBAL_MEM_FENCE);
-
-    for (int i = 1; i < N; i *= 2) {
-        if (!(id % (i * 2)) && ((id + i) < N))
-            B[id] += B[id + i];
-
-        barrier(CLK_GLOBAL_MEM_FENCE);
+    // Reduce local histogram to global histogram
+    if (lid < nr_bins) {
+        if (local_hist[lid] > 0) {
+            atomic_add(&H[lid], local_hist[lid]);
+        }
     }
-}
-
-// Reduce using local memory
-kernel void reduce_add_3(global const int* A, global int* B, local int* scratch) {
-    int id = get_global_id(0);
-    int lid = get_local_id(0);
-    int N = get_local_size(0);
-
-    scratch[lid] = A[id];
-
-    barrier(CLK_LOCAL_MEM_FENCE);
-
-    for (int i = 1; i < N; i *= 2) {
-        if (!(lid % (i * 2)) && ((lid + i) < N))
-            scratch[lid] += scratch[lid + i];
-
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
-
-    B[id] = scratch[lid];
-}
-
-// Reduce using local memory + accumulation
-kernel void reduce_add_4(global const int* A, global int* B, local int* scratch) {
-    int id = get_global_id(0);
-    int lid = get_local_id(0);
-    int N = get_local_size(0);
-
-    scratch[lid] = A[id];
-
-    barrier(CLK_LOCAL_MEM_FENCE);
-
-    for (int i = 1; i < N; i *= 2) {
-        if (!(lid % (i * 2)) && ((lid + i) < N))
-            scratch[lid] += scratch[lid + i];
-
-        barrier(CLK_LOCAL_MEM_FENCE);
-    }
-
-    if (!lid) {
-        atomic_add(&B[0], scratch[lid]);
-    }
-}
-
-// Histogram kernel for 16-bit input (single channel) with variable bins
-kernel void hist_simple(global const ushort* A, global int* H, int nr_bins) {
-    int id = get_global_id(0);
-    ushort value = A[id];
-    int bin_index = (value * nr_bins) / 65536; // Scale 16-bit value to nr_bins
-    if (bin_index >= nr_bins) bin_index = nr_bins - 1; // Clamp to valid range
-    atomic_inc(&H[bin_index]);
 }
 
 // Hillis-Steele basic inclusive scan
@@ -234,11 +73,11 @@ kernel void scan_add(__global const int* A, global int* B, local int* scratch_1,
     B[id] = scratch_1[lid];
 }
 
-// Blelloch basic exclusive scan for cumulative histogram with variable bins
-kernel void scan_bl(global int* A, const int nr_bins) {
+// Blelloch basic exclusive scan for cumulative histogram with variable bins (padded to power of 2)
+kernel void scan_bl(global int* A, const int padded_nr_bins) {
     int id = get_global_id(0);
-    if (id >= nr_bins) return; // Guard against out-of-bounds access
-    int N = nr_bins;
+    if (id >= padded_nr_bins) return; // Guard against out-of-bounds access
+    int N = padded_nr_bins;
     int t;
 
     // Up-sweep

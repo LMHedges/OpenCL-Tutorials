@@ -15,10 +15,22 @@ void print_help() {
     std::cerr << "  -h : print this message" << std::endl;
 }
 
+// Helper function to compute the next power of 2
+size_t next_power_of_2(size_t n) {
+    if (n == 0) return 1;
+    n--;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    return n + 1;
+}
+
 int main(int argc, char **argv) {
     int platform_id = 0;
     int device_id = 0;
-    string image_filename = "mdr16.ppm"; // Default to 16-bit RGB PPM
+    std::string image_filename = "mdr16.ppm"; // Default to 16-bit RGB PPM
     int num_bins = 256; // Default number of bins
 
     for (int i = 1; i < argc; i++) {
@@ -34,6 +46,9 @@ int main(int argc, char **argv) {
         std::cerr << "Error: Number of bins must be positive" << std::endl;
         return 1;
     }
+
+    // Pad num_bins to the next power of 2
+    size_t padded_num_bins = next_power_of_2(num_bins);
 
     cimg::exception_mode(0);
 
@@ -99,7 +114,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        // Device buffers for each channel
+        // Device buffers for each channel (using padded_num_bins)
         std::vector<cl::Buffer> dev_image_input(channels);
         std::vector<cl::Buffer> dev_image_output(channels);
         std::vector<cl::Buffer> dev_histogram(channels);
@@ -109,8 +124,8 @@ int main(int argc, char **argv) {
         for (int c = 0; c < channels; c++) {
             dev_image_input[c] = cl::Buffer(context, CL_MEM_READ_ONLY, image_size * sizeof(unsigned short));
             dev_image_output[c] = cl::Buffer(context, CL_MEM_WRITE_ONLY, image_size * sizeof(unsigned short));
-            dev_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, num_bins * sizeof(unsigned int));
-            dev_cum_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, num_bins * sizeof(unsigned int));
+            dev_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, padded_num_bins * sizeof(unsigned int)); // Padded size
+            dev_cum_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, padded_num_bins * sizeof(unsigned int)); // Padded size
             dev_lut[c] = cl::Buffer(context, CL_MEM_READ_WRITE, 65536 * sizeof(unsigned short)); // Full 16-bit LUT
         }
 
@@ -134,62 +149,72 @@ int main(int argc, char **argv) {
             // Step 1: Copy channel data to device and initialize histogram
             cl::Event event1a, event1b;
             queue.enqueueWriteBuffer(dev_image_input[c], CL_TRUE, 0, image_size * sizeof(unsigned short), input_channels[c].data(), nullptr, &event1a);
-            std::vector<unsigned int> zeros(num_bins, 0);
-            queue.enqueueWriteBuffer(dev_histogram[c], CL_TRUE, 0, num_bins * sizeof(unsigned int), zeros.data(), nullptr, &event1b);
+            std::vector<unsigned int> zeros(padded_num_bins, 0); // Use padded size
+            queue.enqueueWriteBuffer(dev_histogram[c], CL_TRUE, 0, padded_num_bins * sizeof(unsigned int), zeros.data(), nullptr, &event1b);
             event1a.wait();
             event1b.wait();
             metrics[c][0].transfer_time = (event1a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event1a.getProfilingInfo<CL_PROFILING_COMMAND_START>() +
                                            event1b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event1b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
             metrics[c][0].total_time = metrics[c][0].transfer_time;
-            metrics[c][0].work = image_size + num_bins;
+            metrics[c][0].work = image_size + padded_num_bins;
             metrics[c][0].span = 1;
 
-            // Step 2: Calculate histogram
+            // Step 2: Calculate histogram using local memory
             cl::Event event2a, event2b;
-            cl::Kernel hist_kernel(program, "hist_simple");
+            cl::Kernel hist_kernel(program, "hist_local");
+            
+            // Define local work-group size (e.g., 256 threads per group)
+            size_t local_size = 256;
+            size_t global_size = ((image_size + local_size - 1) / local_size) * local_size; // Round up to nearest multiple
+            
+            // Set kernel arguments
             hist_kernel.setArg(0, dev_image_input[c]);
             hist_kernel.setArg(1, dev_histogram[c]);
-            hist_kernel.setArg(2, num_bins);
-            queue.enqueueNDRangeKernel(hist_kernel, cl::NullRange, cl::NDRange(image_size), cl::NullRange, nullptr, &event2a);
+            hist_kernel.setArg(2, num_bins); // Original num_bins for bin scaling
+            hist_kernel.setArg(3, cl::Local(num_bins * sizeof(unsigned int))); // Local memory for histogram
+            
+            // Execute kernel with local work-group size
+            queue.enqueueNDRangeKernel(hist_kernel, cl::NullRange, cl::NDRange(global_size), cl::NDRange(local_size), nullptr, &event2a);
             event2a.wait();
             metrics[c][1].kernel_time = (event2a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event2a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
 
-            std::vector<unsigned int> histogram(num_bins);
-            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, num_bins * sizeof(unsigned int), histogram.data(), nullptr, &event2b);
+            std::vector<unsigned int> histogram(padded_num_bins); // Use padded size
+            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, padded_num_bins * sizeof(unsigned int), histogram.data(), nullptr, &event2b);
             event2b.wait();
             metrics[c][1].transfer_time = (event2b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event2b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
             metrics[c][1].total_time = metrics[c][1].kernel_time + metrics[c][1].transfer_time;
             metrics[c][1].work = image_size;
             metrics[c][1].span = 2;
 
-            CImg<unsigned char> hist_img(num_bins, 200, 1, 1, 0);
+            CImg<unsigned char> hist_img(num_bins, 200, 1, 1, 0); // Display only num_bins, not padded
             const unsigned char white[] = {255};
-            unsigned int max_hist = *std::max_element(histogram.begin(), histogram.end());
+            unsigned int max_hist = *std::max_element(histogram.begin(), histogram.begin() + num_bins); // Limit to num_bins
             for (int x = 0; x < num_bins; x++) {
                 int height = (int)((histogram[x] / (float)max_hist) * 200);
                 hist_img.draw_line(x, 200, x, 200 - height, white);
             }
             disp_hist[c] = CImgDisplay(hist_img, ("Histogram Channel " + std::to_string(c + 1)).c_str());
 
-            // Step 3: Calculate cumulative histogram
+            // Step 3: Calculate cumulative histogram with padded size
             cl::Event event3a, event3b;
             cl::Kernel scan_kernel(program, "scan_bl");
             scan_kernel.setArg(0, dev_histogram[c]);
-            scan_kernel.setArg(1, num_bins);
-            queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(num_bins), cl::NullRange, nullptr, &event3a);
+            scan_kernel.setArg(1, (int)padded_num_bins); // Use padded size
+            queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(padded_num_bins), cl::NDRange(padded_num_bins), nullptr, &event3a);
             event3a.wait();
             metrics[c][2].kernel_time = (event3a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
 
-            std::vector<unsigned int> cum_histogram(num_bins);
-            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, num_bins * sizeof(unsigned int), cum_histogram.data(), nullptr, &event3b);
+            std::vector<unsigned int> cum_histogram(padded_num_bins); // Use padded size
+            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, padded_num_bins * sizeof(unsigned int), cum_histogram.data(), nullptr, &event3b);
             event3b.wait();
+            cout << cum_histogram;
             metrics[c][2].transfer_time = (event3b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
             metrics[c][2].total_time = metrics[c][2].kernel_time + metrics[c][2].transfer_time;
-            metrics[c][2].work = 2 * num_bins - 1;
-            metrics[c][2].span = (size_t)log2((double)num_bins);
+            metrics[c][2].work = 2 * padded_num_bins - 1;
+            metrics[c][2].span = (size_t)log2((double)padded_num_bins);
 
-            CImg<unsigned char> cum_hist_img(num_bins, 200, 1, 1, 0);
-            unsigned int max_cum_hist = cum_histogram[num_bins - 1];
+            CImg<unsigned char> cum_hist_img(num_bins, 200, 1, 1, 0); // Display only num_bins
+            unsigned int max_cum_hist = cum_histogram[num_bins - 1]; // Use actual num_bins for max
             for (int x = 0; x < num_bins; x++) {
                 int height = (int)((cum_histogram[x] / (float)max_cum_hist) * 200);
                 cum_hist_img.draw_line(x, 200, x, 200 - height, white);
@@ -203,7 +228,7 @@ int main(int argc, char **argv) {
             normalize_kernel.setArg(0, dev_histogram[c]);
             normalize_kernel.setArg(1, dev_lut[c]);
             normalize_kernel.setArg(2, scale);
-            normalize_kernel.setArg(3, num_bins);
+            normalize_kernel.setArg(3, num_bins); // Use original num_bins for mapping
             queue.enqueueNDRangeKernel(normalize_kernel, cl::NullRange, cl::NDRange(65536), cl::NullRange, nullptr, &event4a);
             event4a.wait();
             metrics[c][3].kernel_time = (event4a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
@@ -260,7 +285,7 @@ int main(int argc, char **argv) {
         // Print timing and complexity results for each channel
         double combined_total_time = 0.0; // To store the sum of total times across all channels
         for (int c = 0; c < channels; c++) {
-            std::cout << "\nPerformance Metrics (seconds) and Complexity for Channel " << (c + 1) << " (Bins: " << num_bins << "):\n";
+            std::cout << "\nPerformance Metrics (seconds) and Complexity for Channel " << (c + 1) << " (Bins: " << num_bins << ", Padded to " << padded_num_bins << "):\n";
             std::cout << "Step 1: Input Transfer and Initialization\n";
             std::cout << "  Transfer Time: " << metrics[c][0].transfer_time << "\n";
             std::cout << "  Kernel Time: " << metrics[c][0].kernel_time << "\n";
