@@ -29,7 +29,7 @@ kernel void hist_local(global const ushort* A, global int* H, int nr_bins, local
     }
 }
 
-// Hillis-Steele basic inclusive scan
+// Hillis-Steele basic inclusive scan (requires separate output buffer)
 kernel void scan_hs(global int* A, global int* B) {
     int id = get_global_id(0);
     int N = get_global_size(0);

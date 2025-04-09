@@ -1,5 +1,6 @@
 #include <iostream>
 #include <vector>
+#include <string>
 #include "Utils.h"
 #include "CImg.h"
 
@@ -12,6 +13,7 @@ void print_help() {
     std::cerr << "  -l : list all platforms and devices" << std::endl;
     std::cerr << "  -f : input image file" << std::endl;
     std::cerr << "  -b : number of bins (default 256)" << std::endl;
+    std::cerr << "  -s : scan type (bl for Blelloch, hs for Hillis-Steele, default bl)" << std::endl;
     std::cerr << "  -h : print this message" << std::endl;
 }
 
@@ -32,6 +34,7 @@ int main(int argc, char **argv) {
     int device_id = 0;
     std::string image_filename = "mdr16.ppm"; // Default to 16-bit RGB PPM
     int num_bins = 256; // Default number of bins
+    std::string scan_type = "bl"; // Default scan type (Blelloch)
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-p") == 0) && (i < (argc - 1))) { platform_id = atoi(argv[++i]); }
@@ -39,6 +42,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "-l") == 0) { std::cout << ListPlatformsDevices() << std::endl; }
         else if ((strcmp(argv[i], "-f") == 0) && (i < (argc - 1))) { image_filename = argv[++i]; }
         else if ((strcmp(argv[i], "-b") == 0) && (i < (argc - 1))) { num_bins = atoi(argv[++i]); }
+        else if ((strcmp(argv[i], "-s") == 0) && (i < (argc - 1))) { scan_type = argv[++i]; }
         else if (strcmp(argv[i], "-h") == 0) { print_help(); return 0; }
     }
 
@@ -47,8 +51,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Pad num_bins to the next power of 2
+    // Pad num_bins to the next power of 2 (needed for Blelloch scan)
     size_t padded_num_bins = next_power_of_2(num_bins);
+
+    // Validate scan type
+    if (scan_type != "bl" && scan_type != "hs") {
+        std::cerr << "Error: Invalid scan type '" << scan_type << "'. Use 'bl' for Blelloch or 'hs' for Hillis-Steele." << std::endl;
+        return 1;
+    }
 
     cimg::exception_mode(0);
 
@@ -114,18 +124,19 @@ int main(int argc, char **argv) {
             }
         }
 
-        // Device buffers for each channel (using padded_num_bins)
+        // Device buffers for each channel (using padded_num_bins for Blelloch, num_bins for Hillis-Steele)
         std::vector<cl::Buffer> dev_image_input(channels);
         std::vector<cl::Buffer> dev_image_output(channels);
         std::vector<cl::Buffer> dev_histogram(channels);
         std::vector<cl::Buffer> dev_cum_histogram(channels);
         std::vector<cl::Buffer> dev_lut(channels);
 
+        size_t hist_size = (scan_type == "bl") ? padded_num_bins : num_bins; // Use padded size for Blelloch, unpadded for Hillis-Steele
         for (int c = 0; c < channels; c++) {
             dev_image_input[c] = cl::Buffer(context, CL_MEM_READ_ONLY, image_size * sizeof(unsigned short));
             dev_image_output[c] = cl::Buffer(context, CL_MEM_WRITE_ONLY, image_size * sizeof(unsigned short));
-            dev_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, padded_num_bins * sizeof(unsigned int)); // Padded size
-            dev_cum_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, padded_num_bins * sizeof(unsigned int)); // Padded size
+            dev_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, hist_size * sizeof(unsigned int));
+            dev_cum_histogram[c] = cl::Buffer(context, CL_MEM_READ_WRITE, hist_size * sizeof(unsigned int));
             dev_lut[c] = cl::Buffer(context, CL_MEM_READ_WRITE, 65536 * sizeof(unsigned short)); // Full 16-bit LUT
         }
 
@@ -149,14 +160,14 @@ int main(int argc, char **argv) {
             // Step 1: Copy channel data to device and initialize histogram
             cl::Event event1a, event1b;
             queue.enqueueWriteBuffer(dev_image_input[c], CL_TRUE, 0, image_size * sizeof(unsigned short), input_channels[c].data(), nullptr, &event1a);
-            std::vector<unsigned int> zeros(padded_num_bins, 0); // Use padded size
-            queue.enqueueWriteBuffer(dev_histogram[c], CL_TRUE, 0, padded_num_bins * sizeof(unsigned int), zeros.data(), nullptr, &event1b);
+            std::vector<unsigned int> zeros(hist_size, 0); // Use hist_size
+            queue.enqueueWriteBuffer(dev_histogram[c], CL_TRUE, 0, hist_size * sizeof(unsigned int), zeros.data(), nullptr, &event1b);
             event1a.wait();
             event1b.wait();
             metrics[c][0].transfer_time = (event1a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event1a.getProfilingInfo<CL_PROFILING_COMMAND_START>() +
                                            event1b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event1b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
             metrics[c][0].total_time = metrics[c][0].transfer_time;
-            metrics[c][0].work = image_size + padded_num_bins;
+            metrics[c][0].work = image_size + hist_size;
             metrics[c][0].span = 1;
 
             // Step 2: Calculate histogram using local memory
@@ -178,15 +189,15 @@ int main(int argc, char **argv) {
             event2a.wait();
             metrics[c][1].kernel_time = (event2a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event2a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
 
-            std::vector<unsigned int> histogram(padded_num_bins); // Use padded size
-            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, padded_num_bins * sizeof(unsigned int), histogram.data(), nullptr, &event2b);
+            std::vector<unsigned int> histogram(hist_size); // Use hist_size
+            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, hist_size * sizeof(unsigned int), histogram.data(), nullptr, &event2b);
             event2b.wait();
             metrics[c][1].transfer_time = (event2b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event2b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
             metrics[c][1].total_time = metrics[c][1].kernel_time + metrics[c][1].transfer_time;
             metrics[c][1].work = image_size;
             metrics[c][1].span = 2;
 
-            CImg<unsigned char> hist_img(num_bins, 200, 1, 1, 0); // Display only num_bins, not padded
+            CImg<unsigned char> hist_img(num_bins, 200, 1, 1, 0); // Display only num_bins
             const unsigned char white[] = {255};
             unsigned int max_hist = *std::max_element(histogram.begin(), histogram.begin() + num_bins); // Limit to num_bins
             for (int x = 0; x < num_bins; x++) {
@@ -195,23 +206,35 @@ int main(int argc, char **argv) {
             }
             disp_hist[c] = CImgDisplay(hist_img, ("Histogram Channel " + std::to_string(c + 1)).c_str());
 
-            // Step 3: Calculate cumulative histogram with padded size
+            // Step 3: Calculate cumulative histogram based on scan type
             cl::Event event3a, event3b;
-            cl::Kernel scan_kernel(program, "scan_bl");
-            scan_kernel.setArg(0, dev_histogram[c]);
-            scan_kernel.setArg(1, (int)padded_num_bins); // Use padded size
-            queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(padded_num_bins), cl::NDRange(padded_num_bins), nullptr, &event3a);
-            event3a.wait();
-            metrics[c][2].kernel_time = (event3a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            if (scan_type == "bl") {
+                cl::Kernel scan_kernel(program, "scan_bl");
+                scan_kernel.setArg(0, dev_histogram[c]);
+                scan_kernel.setArg(1, (int)padded_num_bins); // Use padded size
+                queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(padded_num_bins), cl::NDRange(padded_num_bins), nullptr, &event3a);
+                event3a.wait();
+                metrics[c][2].kernel_time = (event3a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+                metrics[c][2].work = 2 * padded_num_bins - 1;
+                metrics[c][2].span = (size_t)log2((double)padded_num_bins);
+            } else if (scan_type == "hs") {
+                cl::Kernel scan_kernel(program, "scan_hs");
+                scan_kernel.setArg(0, dev_histogram[c]);
+                scan_kernel.setArg(1, dev_cum_histogram[c]); // Use separate output buffer for Hillis-Steele
+                queue.enqueueNDRangeKernel(scan_kernel, cl::NullRange, cl::NDRange(num_bins), cl::NullRange, nullptr, &event3a);
+                event3a.wait();
+                metrics[c][2].kernel_time = (event3a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+                metrics[c][2].work = num_bins * log2((double)num_bins); // Approximate work for Hillis-Steele
+                metrics[c][2].span = log2((double)num_bins);
+                // Copy result back to dev_histogram for consistency with later steps
+                queue.enqueueCopyBuffer(dev_cum_histogram[c], dev_histogram[c], 0, 0, num_bins * sizeof(unsigned int));
+            }
 
-            std::vector<unsigned int> cum_histogram(padded_num_bins); // Use padded size
-            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, padded_num_bins * sizeof(unsigned int), cum_histogram.data(), nullptr, &event3b);
+            std::vector<unsigned int> cum_histogram(hist_size); // Use hist_size
+            queue.enqueueReadBuffer(dev_histogram[c], CL_TRUE, 0, hist_size * sizeof(unsigned int), cum_histogram.data(), nullptr, &event3b);
             event3b.wait();
-            cout << cum_histogram;
             metrics[c][2].transfer_time = (event3b.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event3b.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
             metrics[c][2].total_time = metrics[c][2].kernel_time + metrics[c][2].transfer_time;
-            metrics[c][2].work = 2 * padded_num_bins - 1;
-            metrics[c][2].span = (size_t)log2((double)padded_num_bins);
 
             CImg<unsigned char> cum_hist_img(num_bins, 200, 1, 1, 0); // Display only num_bins
             unsigned int max_cum_hist = cum_histogram[num_bins - 1]; // Use actual num_bins for max
@@ -231,7 +254,7 @@ int main(int argc, char **argv) {
             normalize_kernel.setArg(3, num_bins); // Use original num_bins for mapping
             queue.enqueueNDRangeKernel(normalize_kernel, cl::NullRange, cl::NDRange(65536), cl::NullRange, nullptr, &event4a);
             event4a.wait();
-            metrics[c][3].kernel_time = (event4a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
+            metrics[c][2].kernel_time = (event4a.getProfilingInfo<CL_PROFILING_COMMAND_END>() - event4a.getProfilingInfo<CL_PROFILING_COMMAND_START>()) * 1e-9;
 
             std::vector<unsigned short> lut(65536);
             queue.enqueueReadBuffer(dev_lut[c], CL_TRUE, 0, 65536 * sizeof(unsigned short), lut.data(), nullptr, &event4b);
@@ -285,7 +308,9 @@ int main(int argc, char **argv) {
         // Print timing and complexity results for each channel
         double combined_total_time = 0.0; // To store the sum of total times across all channels
         for (int c = 0; c < channels; c++) {
-            std::cout << "\nPerformance Metrics (seconds) and Complexity for Channel " << (c + 1) << " (Bins: " << num_bins << ", Padded to " << padded_num_bins << "):\n";
+            std::cout << "\nPerformance Metrics (seconds) and Complexity for Channel " << (c + 1) 
+                      << " (Bins: " << num_bins << (scan_type == "bl" ? ", Padded to " + std::to_string(padded_num_bins) : "") 
+                      << ", Scan: " << (scan_type == "bl" ? "Blelloch" : "Hillis-Steele") << "):\n";
             std::cout << "Step 1: Input Transfer and Initialization\n";
             std::cout << "  Transfer Time: " << metrics[c][0].transfer_time << "\n";
             std::cout << "  Kernel Time: " << metrics[c][0].kernel_time << "\n";
